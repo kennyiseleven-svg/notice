@@ -21,7 +21,7 @@ const ACTION = {
 };
 
 const S = {
-  ready: false, profile: null, departments: [], categories: [], catsReady: false, cat: "all", companies: [], compReady: false, anns: null, users: null, logs: null,
+  ready: false, profile: null, departments: [], categories: [], catsReady: false, cat: "all", anns: null, users: null, logs: null,
   view: { name: "list" }, filter: "live", search: "", userSearch: "",
   busy: false, error: "", info: "", popupShown: false, draft: null,
 };
@@ -31,7 +31,6 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const isAdmin = () => ["admin", "super_admin"].includes(S.profile?.role);
 const isSuper = () => S.profile?.role === "super_admin";
 const deptName = (id) => S.departments.find((d) => d.id === id)?.name ?? "未分配";
-const compName = (id) => S.companies.find((c) => c.id === id)?.name ?? "未分配";
 const catName = (id) => S.categories.find((c) => c.id === id)?.name ?? "";
 
 function fmt(iso) {
@@ -52,17 +51,10 @@ function statusOf(a) {
   return "live";
 }
 function scopeText(a) {
-  const allCo = a.all_companies !== false, parts = [];
-  if (allCo && a.all_departments) return "全公司";
-  if (!allCo) {
-    const ids = new Set((a.announcement_companies ?? []).map((x) => x.company_id));
-    parts.push(S.companies.filter((c) => ids.has(c.id)).map((c) => c.name).join("、") || "未选公司");
-  }
-  if (!a.all_departments) {
-    const ids = new Set((a.announcement_departments ?? []).map((x) => x.department_id));
-    parts.push(S.departments.filter((d) => ids.has(d.id)).map((d) => d.name).join("、") || "未选部门");
-  } else parts.push("所有部门");
-  return parts.join(" · ");
+  if (a.all_departments) return "全公司";
+  const ids = new Set((a.announcement_departments ?? []).map((x) => x.department_id));
+  const names = S.departments.filter((d) => ids.has(d.id)).map((d) => d.name);
+  return names.length ? names.join("、") : "未选部门";
 }
 const sortedAtts = (a) => [...(a.attachments ?? [])].sort((x, y) => x.sort_order - y.sort_order);
 
@@ -144,12 +136,6 @@ async function loadProfile() {
   S.profile = me;
   S.departments = must(await sb.from("departments").select("id,name,sort_order").order("sort_order").order("name"));
   await loadCats();
-  await loadComps();
-}
-// 公司主体表不存在（补丁 003 还没跑）时同样安静降级
-async function loadComps() {
-  const { data, error } = await sb.from("companies").select("id,name,sort_order").order("sort_order").order("name");
-  S.compReady = !error; S.companies = data ?? [];
 }
 // 分类表不存在（补丁 002 还没跑）时安静降级：不显示分类功能
 async function loadCats() {
@@ -158,7 +144,7 @@ async function loadCats() {
 }
 async function loadAnns() {
   S.anns = must(await sb.from("announcements")
-    .select(`*,announcement_departments(department_id),attachments(id,storage_path,sort_order)${S.compReady ? ",announcement_companies(company_id)" : ""}`)
+    .select("*,announcement_departments(department_id),attachments(id,storage_path,sort_order)")
     .order("is_pinned", { ascending: false }).order("publish_at", { ascending: false }).limit(500));
 }
 const loadUsers = async () => { S.users = must(await sb.from("profiles").select("*").order("is_active", { ascending: false }).order("username")); };
@@ -288,8 +274,6 @@ function vDetail() {
 
 function vEditor() {
   const d = S.draft;
-  const comps = d.allCo ? "" : S.companies.map((x) =>
-    `<label class="check"><span>${esc(x.name)}</span><input type="checkbox" data-input="comp" value="${x.id}" ${d.cos.has(x.id) ? "checked" : ""}></label>`).join("");
   const depts = d.all ? "" : S.departments.map((x) =>
     `<label class="check"><span>${esc(x.name)}</span><input type="checkbox" data-input="dept" value="${x.id}" ${d.depts.has(x.id) ? "checked" : ""}></label>`).join("");
   const count = d.kept.length + d.added.length;
@@ -306,9 +290,8 @@ function vEditor() {
     <div class="card"><div class="field"><select data-input="d.category">${catOptions(d.category)}</select></div></div>
     <div class="foot">方便员工按分类查找。发布后仍可随时调整。</div>` : ""}
     <div class="sect">可见范围</div>
-    ${S.compReady && S.companies.length ? `<div class="card"><label class="check"><span>所有公司主体可见</span><input type="checkbox" data-input="d.allCo" ${d.allCo ? "checked" : ""}></label>${comps}</div>` : ""}
-    <div class="card"><label class="check"><span>所有部门可见</span><input type="checkbox" data-input="d.all" ${d.all ? "checked" : ""}></label>${depts}</div>
-    <div class="foot">${d.allCo && d.all ? "所有在职员工都能看到。" : "公司和部门两个条件都符合的员工才能看到。"}</div>
+    <div class="card"><label class="check"><span>全公司可见</span><input type="checkbox" data-input="d.all" ${d.all ? "checked" : ""}></label>${depts}</div>
+    ${d.all ? "" : `<div class="foot">只有勾选部门的员工能看到。</div>`}
     <div class="sect">时间</div>
     <div class="card">
       <label class="check"><span>置顶</span><input type="checkbox" data-input="d.pinned" ${d.pinned ? "checked" : ""}></label>
@@ -331,7 +314,7 @@ function vEditor() {
 function vAdmin() {
   const link = (act, ico, label) => `<button class="row" data-act="${act}"><span>${ico}</span><span class="grow">${label}</span><span class="chev">›</span></button>`;
   return `${bar("管理")}<main><div class="card">
-    ${link("nav-users", "👥", "员工帐号")}${S.catsReady ? link("nav-cats", "🏷️", "公告分类") : ""}${isSuper() && S.compReady ? link("nav-comps", "🏛️", "公司主体") : ""}${isSuper() ? link("nav-depts", "🗂️", "部门") : ""}${link("nav-logs", "📋", "操作日志")}
+    ${link("nav-users", "👥", "员工帐号")}${S.catsReady ? link("nav-cats", "🏷️", "公告分类") : ""}${isSuper() ? link("nav-depts", "🏢", "部门") : ""}${link("nav-logs", "📋", "操作日志")}
   </div><div class="foot">发布与编辑公告请到「公告」页右上角。</div></main>${tabs("admin")}`;
 }
 
@@ -343,7 +326,7 @@ function vUsers() {
   const row = (u) => `<button class="row ${u.is_active ? "" : "dim"}" data-act="open-user" data-id="${u.id}"><div class="grow">
       <div>${esc(u.display_name)} ${u.role !== "staff" ? `<span class="badge">${ROLE[u.role]}</span>` : ""}
         ${u.must_change_password && u.is_active ? `<span class="badge warn">未改密</span>` : ""}</div>
-      <div class="meta">${esc(u.username)} · ${esc(deptName(u.department_id))}${S.compReady && u.company_id ? ` · ${esc(compName(u.company_id))}` : ""}</div></div><span class="chev">›</span></button>`;
+      <div class="meta">${esc(u.username)} · ${esc(deptName(u.department_id))}</div></div><span class="chev">›</span></button>`;
   const active = list.filter((u) => u.is_active), inactive = list.filter((u) => !u.is_active);
   return `${head}<main>
     <input class="search" type="search" placeholder="搜索姓名或登录名" value="${esc(S.userSearch)}" data-input="userSearch">${msgs()}
@@ -353,8 +336,6 @@ function vUsers() {
 }
 
 const catOptions = (sel) => `<option value="">未分类</option>` + S.categories.map((c) => `<option value="${c.id}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("");
-const compOptions = (sel) => `<option value="">未分配</option>` + S.companies.map((c) => `<option value="${c.id}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("");
-const compField = (sel, dis = "") => S.compReady && S.companies.length ? `<div class="field"><label>所属公司</label><select name="company_id" ${dis}>${compOptions(sel)}</select></div>` : "";
 const deptOptions = (sel) => `<option value="">未分配</option>` + S.departments.map((d) => `<option value="${d.id}" ${d.id === sel ? "selected" : ""}>${esc(d.name)}</option>`).join("");
 const roleOptions = (sel) => Object.entries(ROLE).reverse().map(([k, v]) => `<option value="${k}" ${k === sel ? "selected" : ""}>${v}</option>`).join("");
 
@@ -367,7 +348,6 @@ function vUserNew() {
     </div>
     <div class="foot">登录名建立后不能修改。密码由系统自动生成，下一步显示。</div>
     <div class="card">
-      ${compField("")}
       <div class="field"><label>部门</label><select name="department_id">${deptOptions("")}</select></div>
       ${isSuper() ? `<div class="field"><label>身份</label><select name="role">${roleOptions("staff")}</select></div>` : ""}
     </div>
@@ -384,7 +364,6 @@ function vUser() {
       <div class="row"><span class="grow">登录名</span><span class="val">${esc(u.username)}</span></div>
       <div class="field"><label>姓名</label><input type="text" name="display_name" value="${esc(u.display_name)}" ${dis} required></div>
       <div class="field"><label>署名字母</label><input type="text" name="initials" value="${esc(u.initials)}" autocapitalize="characters" ${dis}></div>
-      ${compField(u.company_id, dis)}
       <div class="field"><label>部门</label><select name="department_id" ${dis}>${deptOptions(u.department_id)}</select></div>
       ${isSuper() && !self ? `<div class="field"><label>身份</label><select name="role">${roleOptions(u.role)}</select></div>`
         : `<div class="row"><span class="grow">身份</span><span class="val">${ROLE[u.role]}</span></div>`}
@@ -408,18 +387,6 @@ function vDepts() {
     <div class="card">${S.departments.map((d) => `<div class="row"><span class="grow">${esc(d.name)}</span>
       <button class="link" data-act="dept-rename" data-id="${d.id}">改名</button><button class="link danger" data-act="dept-delete" data-id="${d.id}">删除</button></div>`).join("")}</div>
     <div class="foot">删除部门后，该部门员工变成「未分配」，只能看到全公司公告。</div></main>`;
-}
-
-function vComps() {
-  const count = (id) => (S.users ?? []).filter((u) => u.company_id === id && u.is_active).length;
-  return `${bar("公司主体", { left: backBtn })}<main>
-    <form data-form="comp-new" class="card"><div class="field"><label>新增公司主体</label>
-      <div style="display:flex;gap:8px"><input type="text" name="name" placeholder="公司全名" required><button class="link">新增</button></div></div></form>
-    ${msgs()}
-    <div class="sect">现有公司主体</div>
-    <div class="card">${S.companies.map((c) => `<div class="row"><span class="grow">${esc(c.name)} <span class="meta" style="display:inline">${count(c.id)} 人</span></span>
-      <button class="link" data-act="comp-rename" data-id="${c.id}">改名</button><button class="link danger" data-act="comp-delete" data-id="${c.id}">删除</button></div>`).join("") || `<div class="row val">还没有公司主体</div>`}</div>
-    <div class="foot">员工的所属公司在「员工帐号」里设定。删除公司主体后，该公司员工变成「未分配」，限定该公司的公告将没有员工能看到。</div></main>`;
 }
 
 function vCats() {
@@ -454,7 +421,7 @@ function vLogs() {
 function vAccount() {
   const p = S.profile, kv = (k, v) => `<div class="row"><span class="grow">${k}</span><span class="val">${esc(v)}</span></div>`;
   return `${bar("我的")}<main>
-    <div class="card">${kv("姓名", p.display_name)}${kv("登录名", p.username)}${S.compReady && S.companies.length ? kv("所属公司", compName(p.company_id)) : ""}${kv("部门", deptName(p.department_id))}${kv("身份", ROLE[p.role])}</div>
+    <div class="card">${kv("姓名", p.display_name)}${kv("登录名", p.username)}${kv("部门", deptName(p.department_id))}${kv("身份", ROLE[p.role])}</div>
     <div class="card"><button class="row" data-act="nav-password"><span class="grow">修改密码</span><span class="chev">›</span></button></div>
     <button class="btn red" data-act="signout-confirm">登出</button>
     <div class="foot" style="text-align:center;margin-top:18px">提示：手机浏览器选「加入主屏幕」，可像 App 一样打开。</div>
@@ -469,9 +436,9 @@ function render() {
   else if (S.profile.must_change_password) html = vPassword(true);
   else {
     const n = S.view.name;
-    if (!isAdmin() && ["admin", "users", "user", "user-new", "depts", "comps", "cats", "logs", "editor"].includes(n)) S.view = { name: "list" };
+    if (!isAdmin() && ["admin", "users", "user", "user-new", "depts", "cats", "logs", "editor"].includes(n)) S.view = { name: "list" };
     html = ({ list: vList, detail: vDetail, editor: vEditor, admin: vAdmin, users: vUsers, "user-new": vUserNew,
-      user: vUser, depts: vDepts, comps: vComps, cats: vCats, logs: vLogs, account: vAccount, password: () => vPassword(false) }[S.view.name] ?? vList)();
+      user: vUser, depts: vDepts, cats: vCats, logs: vLogs, account: vAccount, password: () => vPassword(false) }[S.view.name] ?? vList)();
   }
   // 重绘时保住输入焦点（搜索框）
   const active = document.activeElement?.dataset?.input, pos = document.activeElement?.selectionStart;
@@ -570,12 +537,11 @@ function newDraft(a) {
   const soon = new Date(Date.now() + 3600e3), month = new Date(Date.now() + 30 * 86400e3);
   return a ? {
     id: a.id, title: a.title, body: a.body ?? "", initials: a.author_initials ?? "", category: a.category_id ?? "", all: a.all_departments,
-    allCo: a.all_companies !== false, cos: new Set((a.announcement_companies ?? []).map((x) => x.company_id)),
     depts: new Set((a.announcement_departments ?? []).map((x) => x.department_id)), pinned: a.is_pinned,
     scheduled: new Date(a.publish_at) > new Date(), publishAt: toLocalInput(a.publish_at), originalPublishAt: a.publish_at,
     hasExpiry: !!a.unpublish_at, unpublishAt: toLocalInput(a.unpublish_at ?? month), kept: sortedAtts(a), removed: [], added: [],
   } : {
-    id: null, title: "", body: "", initials: S.profile.initials ?? "", category: S.cat !== "all" && S.cat !== "none" ? S.cat : "", all: true, allCo: true, cos: new Set(), depts: new Set(), pinned: false,
+    id: null, title: "", body: "", initials: S.profile.initials ?? "", category: S.cat !== "all" && S.cat !== "none" ? S.cat : "", all: true, depts: new Set(), pinned: false,
     scheduled: false, publishAt: toLocalInput(soon), originalPublishAt: null,
     hasExpiry: false, unpublishAt: toLocalInput(month), kept: [], removed: [], added: [],
   };
@@ -584,8 +550,7 @@ function newDraft(a) {
 async function saveAnnouncement() {
   const d = S.draft, title = d.title.trim();
   if (!title) throw new Error("请填标题");
-  if (!d.all && !d.depts.size) throw new Error("请至少选一个部门，或打开「所有部门可见」");
-  if (!d.allCo && !d.cos.size) throw new Error("请至少选一个公司主体，或打开「所有公司主体可见」");
+  if (!d.all && !d.depts.size) throw new Error("请至少选一个部门，或打开「全公司可见」");
   // 新公告不预约 = 立即；旧公告不预约 = 保持原上架时间（若原本是未来则改为现在）
   const now = new Date();
   const publish = d.scheduled ? new Date(d.publishAt)
@@ -601,16 +566,11 @@ async function saveAnnouncement() {
   const fields = { title, body: d.body.trim(), author_initials: d.initials.trim().toUpperCase(), all_departments: d.all,
     is_pinned: d.pinned, publish_at: publish.toISOString(), unpublish_at: unpublish ? unpublish.toISOString() : null };
   if (S.catsReady) fields.category_id = d.category || null;
-  if (S.compReady) fields.all_companies = d.allCo;
   if (d.id) mustAffect(await sb.from("announcements").update(fields).eq("id", id).select("id"), "保存");
   else must(await sb.from("announcements").insert({ id, ...fields }));
 
   must(await sb.from("announcement_departments").delete().eq("announcement_id", id));
   if (!d.all) must(await sb.from("announcement_departments").insert([...d.depts].map((x) => ({ announcement_id: id, department_id: x }))));
-  if (S.compReady) {
-    must(await sb.from("announcement_companies").delete().eq("announcement_id", id));
-    if (!d.allCo) must(await sb.from("announcement_companies").insert([...d.cos].map((x) => ({ announcement_id: id, company_id: x }))));
-  }
 
   for (const t of d.removed) {
     must(await sb.from("attachments").delete().eq("id", t.id));
@@ -658,16 +618,6 @@ const actions = {
       paths.forEach((p) => imgCache.delete(p));
       await loadAnns(); back();
     });
-  },
-  "nav-comps": () => { go({ name: "comps" }); Promise.all([loadComps(), loadUsers()]).then(render); },
-  "comp-rename": async (el) => {
-    const c = S.companies.find((x) => x.id === el.dataset.id), name = await promptModal({ title: "公司主体改名", value: c.name });
-    if (name && name !== c.name) run(async () => { mustAffect(await sb.from("companies").update({ name }).eq("id", c.id).select("id"), "改名"); await loadComps(); });
-  },
-  "comp-delete": async (el) => {
-    const c = S.companies.find((x) => x.id === el.dataset.id);
-    if (!(await confirmModal({ title: `删除「${c.name}」？`, text: "该公司员工会变成「未分配」，限定该公司的公告将没有员工能看到。", okLabel: "删除", danger: true }))) return;
-    run(async () => { mustAffect(await sb.from("companies").delete().eq("id", c.id).select("id"), "删除"); await loadComps(); });
   },
   "nav-cats": () => { go({ name: "cats" }); Promise.all([loadCats(), S.anns ? null : loadAnns()]).then(render); },
   "cat-rename": async (el) => {
@@ -732,25 +682,17 @@ const forms = {
     if (!/^[a-z0-9._-]{2,32}$/.test(username)) throw new Error("登录名只能用小写字母、数字、. _ -，长度 2 到 32");
     const cred = await adminAction({ action: "create_user", username, display_name: f.display_name.value.trim(),
       initials: f.initials.value.trim().toUpperCase(), role: f.role?.value ?? "staff", department_id: f.department_id.value || null });
-    // 所属公司在建号后补写，这样不用重新部署后端函数
-    if (f.company_id?.value) mustAffect(await sb.from("profiles").update({ company_id: f.company_id.value }).eq("id", cred.user_id).select("id"), "设定所属公司");
     await loadUsers(); S.busy = false; S.view = { name: "users" }; history.replaceState(S.view, ""); render();
     await credentialModal(cred, true);
   }),
   "user-edit": (f) => run(async () => {
     const id = f.dataset.id, u = S.users.find((x) => x.id === id);
-    const patch = { display_name: f.display_name.value.trim(), initials: f.initials.value.trim().toUpperCase(), department_id: f.department_id.value || null };
-    if (f.company_id) patch.company_id = f.company_id.value || null;
-    mustAffect(await sb.from("profiles").update(patch).eq("id", id).select("id"), "保存");
+    mustAffect(await sb.from("profiles").update({ display_name: f.display_name.value.trim(), initials: f.initials.value.trim().toUpperCase(),
+      department_id: f.department_id.value || null }).eq("id", id).select("id"), "保存");
     if (f.role && f.role.value !== u.role) await adminAction({ action: "set_role", user_id: id, role: f.role.value });
     await loadUsers();
     if (id === S.profile.id) await loadProfile();
     S.info = "已保存";
-  }),
-  "comp-new": (f) => run(async () => {
-    const next = Math.max(0, ...S.companies.map((c) => c.sort_order)) + 1;
-    must(await sb.from("companies").insert({ name: f.name.value.trim(), sort_order: next }));
-    await loadComps();
   }),
   "cat-new": (f) => run(async () => {
     const next = Math.max(0, ...S.categories.map((c) => c.sort_order)) + 1;
@@ -797,8 +739,6 @@ $app.addEventListener("change", async (e) => {
   if (!key || !d) return;
   if (key === "d.category") d.category = e.target.value;
   else if (key === "d.all") { d.all = e.target.checked; render(); }
-  else if (key === "d.allCo") { d.allCo = e.target.checked; render(); }
-  else if (key === "comp") { e.target.checked ? d.cos.add(e.target.value) : d.cos.delete(e.target.value); }
   else if (key === "d.pinned") d.pinned = e.target.checked;
   else if (key === "d.scheduled") { d.scheduled = e.target.checked; render(); }
   else if (key === "d.hasExpiry") { d.hasExpiry = e.target.checked; render(); }

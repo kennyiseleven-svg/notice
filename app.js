@@ -17,11 +17,11 @@ const STATUS = { live: "生效中", scheduled: "预约中", expired: "已到期"
 const ACTION = {
   create_user: "建立帐号", reset_password: "重置密码", deactivate_user: "停用帐号", activate_user: "启用帐号",
   set_role: "变更角色", update_user: "修改员工资料", create_announcement: "发布公告",
-  update_announcement: "修改公告", archive_announcement: "归档公告",
+  update_announcement: "修改公告", archive_announcement: "归档公告", delete_announcement: "删除公告",
 };
 
 const S = {
-  ready: false, profile: null, departments: [], anns: null, users: null, logs: null,
+  ready: false, profile: null, departments: [], categories: [], catsReady: false, cat: "all", anns: null, users: null, logs: null,
   view: { name: "list" }, filter: "live", search: "", userSearch: "",
   busy: false, error: "", info: "", popupShown: false, draft: null,
 };
@@ -31,6 +31,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const isAdmin = () => ["admin", "super_admin"].includes(S.profile?.role);
 const isSuper = () => S.profile?.role === "super_admin";
 const deptName = (id) => S.departments.find((d) => d.id === id)?.name ?? "未分配";
+const catName = (id) => S.categories.find((c) => c.id === id)?.name ?? "";
 
 function fmt(iso) {
   if (!iso) return "";
@@ -128,6 +129,12 @@ async function loadProfile() {
   }
   S.profile = me;
   S.departments = must(await sb.from("departments").select("id,name,sort_order").order("sort_order").order("name"));
+  await loadCats();
+}
+// 分类表不存在（补丁 002 还没跑）时安静降级：不显示分类功能
+async function loadCats() {
+  const { data, error } = await sb.from("categories").select("id,name,sort_order").order("sort_order").order("name");
+  S.catsReady = !error; S.categories = data ?? [];
 }
 async function loadAnns() {
   S.anns = must(await sb.from("announcements")
@@ -201,7 +208,15 @@ function vList() {
   const head = bar("公告", { right: isAdmin() ? `<button class="link" data-act="new-ann">＋ 发布</button>` : "" });
   if (!S.anns) return head + loadingMain + tabs("list");
   const q = S.search.trim().toLowerCase(), read = readIDs();
-  const shown = S.anns.filter((a) => (!isAdmin() || statusOf(a) === S.filter) &&
+  const pool = S.anns.filter((a) => !isAdmin() || statusOf(a) === S.filter);
+  const hasNone = pool.some((a) => !a.category_id);
+  if (S.cat !== "all" && S.cat !== "none" && !S.categories.some((c) => c.id === S.cat)) S.cat = "all";
+  if (S.cat === "none" && !hasNone) S.cat = "all";
+  const chip = (id, label, n) => `<button class="chip ${S.cat === id ? "on" : ""}" data-act="cat" data-cat="${id}">${esc(label)}<i>${n}</i></button>`;
+  const chips = S.catsReady && S.categories.length ? `<div class="chips">${chip("all", "全部", pool.length)}${S.categories
+    .map((c) => [c, pool.filter((a) => a.category_id === c.id).length]).filter(([, n]) => n || isAdmin())
+    .map(([c, n]) => chip(c.id, c.name, n)).join("")}${hasNone ? chip("none", "未分类", pool.filter((a) => !a.category_id).length) : ""}</div>` : "";
+  const shown = pool.filter((a) => (S.cat === "all" || (S.cat === "none" ? !a.category_id : a.category_id === S.cat)) &&
     (!q || a.title.toLowerCase().includes(q) || (a.body ?? "").toLowerCase().includes(q)));
   const seg = isAdmin() ? `<div class="seg">${Object.entries(STATUS).map(([k, v]) =>
     `<button class="${S.filter === k ? "on" : ""}" data-act="filter" data-filter="${k}">${v}</button>`).join("")}</div>` : "";
@@ -209,12 +224,12 @@ function vList() {
       <span class="dot ${read.has(a.id) ? "read" : ""}"></span><div class="grow">
       <h3>${a.is_pinned ? `<span class="pin">📌</span> ` : ""}${esc(a.title)}</h3>
       ${a.body ? `<p>${esc(a.body)}</p>` : ""}
-      <div class="meta"><span>${fmt(a.publish_at)}</span>${a.author_initials ? `<span>署名 ${esc(a.author_initials)}</span>` : ""}
+      <div class="meta">${a.category_id && catName(a.category_id) ? `<span class="badge">${esc(catName(a.category_id))}</span>` : ""}<span>${fmt(a.publish_at)}</span>${a.author_initials ? `<span>署名 ${esc(a.author_initials)}</span>` : ""}
         ${a.attachments?.length ? `<span>🖼 ${a.attachments.length}</span>` : ""}${isAdmin() ? `<span>${esc(scopeText(a))}</span>` : ""}</div>
     </div></div></button>`).join("");
   return `${head}<main>
     <input class="search" type="search" placeholder="搜索标题或内容" value="${esc(S.search)}" data-input="search">
-    ${seg}${msgs()}
+    ${seg}${chips}${msgs()}
     ${shown.length ? `<div class="card">${rows}</div>` : `<div class="empty"><div class="big">${q ? "🔍" : "📭"}</div>${q ? "找不到符合的公告" : "目前没有公告"}</div>`}
     <button class="btn ghost" data-act="refresh">刷新</button>
   </main>${tabs("list")}`;
@@ -225,6 +240,7 @@ function annBody(a, popup = false) {
     ${popup ? `<div class="newtag">🔔 最新公告</div>` : ""}
     <h2>${a.is_pinned ? `<span class="pin">📌</span> ` : ""}${esc(a.title)}</h2>
     <div class="kv">
+      ${a.category_id && catName(a.category_id) ? `<span>分类</span><span>${esc(catName(a.category_id))}</span>` : ""}
       <span>发布时间</span><span>${fmt(a.publish_at)}</span>
       ${a.unpublish_at ? `<span>有效至</span><span>${fmt(a.unpublish_at)}</span>` : ""}
       ${a.author_initials ? `<span>署名</span><span>${esc(a.author_initials)}</span>` : ""}
@@ -241,9 +257,12 @@ function vDetail() {
   if (!a) return `${bar("公告", { left: backBtn })}<main><div class="empty">这则公告已不存在或你无权查看</div></main>`;
   const right = isAdmin() ? `<button class="link" data-act="edit-ann" data-id="${a.id}">编辑</button>` : "";
   return `${bar("公告", { left: backBtn, right })}<main>${annBody(a)}${msgs()}
-    ${isAdmin() ? `<div style="margin-top:26px">${a.is_archived
+    ${isAdmin() && S.catsReady ? `<div class="sect" style="margin-top:26px">分类（可随时调整）</div>
+      <div class="card"><div class="field"><select data-input="quick-cat" data-id="${a.id}">${catOptions(a.category_id)}</select></div></div>` : ""}
+    ${isAdmin() ? `<div style="margin-top:18px">${a.is_archived
       ? `<button class="btn ghost" data-act="archive" data-id="${a.id}" data-value="0">取消归档</button>`
-      : `<button class="btn red" data-act="archive" data-id="${a.id}" data-value="1">归档</button>`}</div>` : ""}
+      : `<button class="btn ghost" data-act="archive" data-id="${a.id}" data-value="1">归档（员工看不到，可恢复）</button>`}
+      <button class="btn red" data-act="delete-ann" data-id="${a.id}">删除公告（无法恢复）</button></div>` : ""}
   </main>`;
 }
 
@@ -261,6 +280,9 @@ function vEditor() {
       <div class="field"><label>正文</label><textarea data-input="d.body" placeholder="公告内容">${esc(d.body)}</textarea></div>
       <div class="field"><label>署名字母</label><input type="text" data-input="d.initials" value="${esc(d.initials)}" placeholder="例如 KC" autocapitalize="characters"></div>
     </div>
+    ${S.catsReady ? `<div class="sect">分类</div>
+    <div class="card"><div class="field"><select data-input="d.category">${catOptions(d.category)}</select></div></div>
+    <div class="foot">方便员工按分类查找。发布后仍可随时调整。</div>` : ""}
     <div class="sect">可见范围</div>
     <div class="card"><label class="check"><span>全公司可见</span><input type="checkbox" data-input="d.all" ${d.all ? "checked" : ""}></label>${depts}</div>
     ${d.all ? "" : `<div class="foot">只有勾选部门的员工能看到。</div>`}
@@ -286,7 +308,7 @@ function vEditor() {
 function vAdmin() {
   const link = (act, ico, label) => `<button class="row" data-act="${act}"><span>${ico}</span><span class="grow">${label}</span><span class="chev">›</span></button>`;
   return `${bar("管理")}<main><div class="card">
-    ${link("nav-users", "👥", "员工帐号")}${isSuper() ? link("nav-depts", "🏢", "部门") : ""}${link("nav-logs", "📋", "操作日志")}
+    ${link("nav-users", "👥", "员工帐号")}${S.catsReady ? link("nav-cats", "🏷️", "公告分类") : ""}${isSuper() ? link("nav-depts", "🏢", "部门") : ""}${link("nav-logs", "📋", "操作日志")}
   </div><div class="foot">发布与编辑公告请到「公告」页右上角。</div></main>${tabs("admin")}`;
 }
 
@@ -307,6 +329,7 @@ function vUsers() {
   </main>`;
 }
 
+const catOptions = (sel) => `<option value="">未分类</option>` + S.categories.map((c) => `<option value="${c.id}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("");
 const deptOptions = (sel) => `<option value="">未分配</option>` + S.departments.map((d) => `<option value="${d.id}" ${d.id === sel ? "selected" : ""}>${esc(d.name)}</option>`).join("");
 const roleOptions = (sel) => Object.entries(ROLE).reverse().map(([k, v]) => `<option value="${k}" ${k === sel ? "selected" : ""}>${v}</option>`).join("");
 
@@ -360,6 +383,18 @@ function vDepts() {
     <div class="foot">删除部门后，该部门员工变成「未分配」，只能看到全公司公告。</div></main>`;
 }
 
+function vCats() {
+  const count = (id) => (S.anns ?? []).filter((a) => a.category_id === id).length;
+  return `${bar("公告分类", { left: backBtn })}<main>
+    <form data-form="cat-new" class="card"><div class="field"><label>新增分类</label>
+      <div style="display:flex;gap:8px"><input type="text" name="name" placeholder="分类名称" required><button class="link">新增</button></div></div></form>
+    ${msgs()}
+    <div class="sect">现有分类</div>
+    <div class="card">${S.categories.map((c) => `<div class="row"><span class="grow">${esc(c.name)} <span class="meta" style="display:inline">${count(c.id)} 则</span></span>
+      <button class="link" data-act="cat-rename" data-id="${c.id}">改名</button><button class="link danger" data-act="cat-delete" data-id="${c.id}">删除</button></div>`).join("") || `<div class="row val">还没有分类</div>`}</div>
+    <div class="foot">删除分类不会删公告，该分类下的公告会变成「未分类」。</div></main>`;
+}
+
 function vLogs() {
   const head = bar("操作日志", { left: backBtn });
   if (!S.logs) return head + loadingMain;
@@ -395,9 +430,9 @@ function render() {
   else if (S.profile.must_change_password) html = vPassword(true);
   else {
     const n = S.view.name;
-    if (!isAdmin() && ["admin", "users", "user", "user-new", "depts", "logs", "editor"].includes(n)) S.view = { name: "list" };
+    if (!isAdmin() && ["admin", "users", "user", "user-new", "depts", "cats", "logs", "editor"].includes(n)) S.view = { name: "list" };
     html = ({ list: vList, detail: vDetail, editor: vEditor, admin: vAdmin, users: vUsers, "user-new": vUserNew,
-      user: vUser, depts: vDepts, logs: vLogs, account: vAccount, password: () => vPassword(false) }[S.view.name] ?? vList)();
+      user: vUser, depts: vDepts, cats: vCats, logs: vLogs, account: vAccount, password: () => vPassword(false) }[S.view.name] ?? vList)();
   }
   // 重绘时保住输入焦点（搜索框）
   const active = document.activeElement?.dataset?.input, pos = document.activeElement?.selectionStart;
@@ -495,12 +530,12 @@ async function refreshAnns({ popup = false } = {}) {
 function newDraft(a) {
   const soon = new Date(Date.now() + 3600e3), month = new Date(Date.now() + 30 * 86400e3);
   return a ? {
-    id: a.id, title: a.title, body: a.body ?? "", initials: a.author_initials ?? "", all: a.all_departments,
+    id: a.id, title: a.title, body: a.body ?? "", initials: a.author_initials ?? "", category: a.category_id ?? "", all: a.all_departments,
     depts: new Set((a.announcement_departments ?? []).map((x) => x.department_id)), pinned: a.is_pinned,
     scheduled: new Date(a.publish_at) > new Date(), publishAt: toLocalInput(a.publish_at), originalPublishAt: a.publish_at,
     hasExpiry: !!a.unpublish_at, unpublishAt: toLocalInput(a.unpublish_at ?? month), kept: sortedAtts(a), removed: [], added: [],
   } : {
-    id: null, title: "", body: "", initials: S.profile.initials ?? "", all: true, depts: new Set(), pinned: false,
+    id: null, title: "", body: "", initials: S.profile.initials ?? "", category: S.cat !== "all" && S.cat !== "none" ? S.cat : "", all: true, depts: new Set(), pinned: false,
     scheduled: false, publishAt: toLocalInput(soon), originalPublishAt: null,
     hasExpiry: false, unpublishAt: toLocalInput(month), kept: [], removed: [], added: [],
   };
@@ -524,6 +559,7 @@ async function saveAnnouncement() {
   const id = d.id ?? crypto.randomUUID();
   const fields = { title, body: d.body.trim(), author_initials: d.initials.trim().toUpperCase(), all_departments: d.all,
     is_pinned: d.pinned, publish_at: publish.toISOString(), unpublish_at: unpublish ? unpublish.toISOString() : null };
+  if (S.catsReady) fields.category_id = d.category || null;
   if (d.id) must(await sb.from("announcements").update(fields).eq("id", id));
   else must(await sb.from("announcements").insert({ id, ...fields }));
 
@@ -563,6 +599,28 @@ const actions = {
     const on = el.dataset.value === "1";
     if (on && !(await confirmModal({ title: "归档这则公告？", text: "归档后员工将看不到，管理员仍可在「已归档」找到。", okLabel: "归档", danger: true }))) return;
     run(async () => { must(await sb.from("announcements").update({ is_archived: on }).eq("id", el.dataset.id)); await loadAnns(); back(); });
+  },
+  cat: (el) => { S.cat = el.dataset.cat; render(); },
+  "delete-ann": async (el) => {
+    const a = S.anns.find((x) => x.id === el.dataset.id);
+    if (!a || !(await confirmModal({ title: "删除这则公告？", text: `「${a.title}」和它的图片会永久删除，无法恢复。只是暂时不想让员工看到，请改用「归档」。`, okLabel: "永久删除", danger: true }))) return;
+    run(async () => {
+      const paths = (a.attachments ?? []).map((t) => t.storage_path);
+      if (paths.length) await sb.storage.from(CONFIG.bucket).remove(paths);
+      must(await sb.from("announcements").delete().eq("id", a.id));
+      paths.forEach((p) => imgCache.delete(p));
+      await loadAnns(); back();
+    });
+  },
+  "nav-cats": () => { go({ name: "cats" }); Promise.all([loadCats(), S.anns ? null : loadAnns()]).then(render); },
+  "cat-rename": async (el) => {
+    const c = S.categories.find((x) => x.id === el.dataset.id), name = await promptModal({ title: "分类改名", value: c.name });
+    if (name && name !== c.name) run(async () => { must(await sb.from("categories").update({ name }).eq("id", c.id)); await loadCats(); });
+  },
+  "cat-delete": async (el) => {
+    const c = S.categories.find((x) => x.id === el.dataset.id);
+    if (!(await confirmModal({ title: `删除分类「${c.name}」？`, text: "公告不会被删，该分类下的公告会变成「未分类」。", okLabel: "删除", danger: true }))) return;
+    run(async () => { must(await sb.from("categories").delete().eq("id", c.id)); await loadCats(); await loadAnns(); });
   },
   "nav-users": () => { go({ name: "users" }); loadUsers().catch((e) => { S.error = friendly(e); S.users ??= []; }).finally(render); },
   "nav-user-new": () => go({ name: "user-new" }),
@@ -629,6 +687,11 @@ const forms = {
     if (id === S.profile.id) await loadProfile();
     S.info = "已保存";
   }),
+  "cat-new": (f) => run(async () => {
+    const next = Math.max(0, ...S.categories.map((c) => c.sort_order)) + 1;
+    must(await sb.from("categories").insert({ name: f.name.value.trim(), sort_order: next }));
+    await loadCats();
+  }),
   "dept-new": (f) => run(async () => {
     const next = Math.max(0, ...S.departments.map((d) => d.sort_order)) + 1;
     must(await sb.from("departments").insert({ name: f.name.value.trim(), sort_order: next }));
@@ -662,8 +725,13 @@ $app.addEventListener("input", (e) => {
 });
 $app.addEventListener("change", async (e) => {
   const key = e.target.dataset.input, d = S.draft;
+  if (key === "quick-cat") {
+    const id = e.target.dataset.id, value = e.target.value || null;
+    return run(async () => { must(await sb.from("announcements").update({ category_id: value }).eq("id", id)); await loadAnns(); S.info = "分类已更新"; });
+  }
   if (!key || !d) return;
-  if (key === "d.all") { d.all = e.target.checked; render(); }
+  if (key === "d.category") d.category = e.target.value;
+  else if (key === "d.all") { d.all = e.target.checked; render(); }
   else if (key === "d.pinned") d.pinned = e.target.checked;
   else if (key === "d.scheduled") { d.scheduled = e.target.checked; render(); }
   else if (key === "d.hasExpiry") { d.hasExpiry = e.target.checked; render(); }

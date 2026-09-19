@@ -71,6 +71,12 @@ function friendly(err) {
   return msg || "发生未知错误";
 }
 const must = ({ data, error }) => { if (error) throw error; return data; };
+// 数据库权限不足时，改 / 删会「成功但影响 0 行」，不报错。写入类操作一律带 .select("id") 并用这个检查。
+const mustAffect = (res, what) => {
+  const rows = must(res);
+  if (!rows?.length) throw new Error(`${what}没有生效：数据库拒绝了这个操作。若刚更新过功能，请先在 Supabase 执行最新的补丁 SQL。`);
+  return rows;
+};
 
 // 本机已读记录（不上传，不做签收统计）
 const readKey = () => `readIDs.${S.profile?.id}`;
@@ -262,7 +268,7 @@ function vDetail() {
     ${isAdmin() ? `<div style="margin-top:18px">${a.is_archived
       ? `<button class="btn ghost" data-act="archive" data-id="${a.id}" data-value="0">取消归档</button>`
       : `<button class="btn ghost" data-act="archive" data-id="${a.id}" data-value="1">归档（员工看不到，可恢复）</button>`}
-      <button class="btn red" data-act="delete-ann" data-id="${a.id}">删除公告（无法恢复）</button></div>` : ""}
+      ${S.catsReady ? `<button class="btn red" data-act="delete-ann" data-id="${a.id}">删除公告（无法恢复）</button>` : ""}</div>` : ""}
   </main>`;
 }
 
@@ -560,7 +566,7 @@ async function saveAnnouncement() {
   const fields = { title, body: d.body.trim(), author_initials: d.initials.trim().toUpperCase(), all_departments: d.all,
     is_pinned: d.pinned, publish_at: publish.toISOString(), unpublish_at: unpublish ? unpublish.toISOString() : null };
   if (S.catsReady) fields.category_id = d.category || null;
-  if (d.id) must(await sb.from("announcements").update(fields).eq("id", id));
+  if (d.id) mustAffect(await sb.from("announcements").update(fields).eq("id", id).select("id"), "保存");
   else must(await sb.from("announcements").insert({ id, ...fields }));
 
   must(await sb.from("announcement_departments").delete().eq("announcement_id", id));
@@ -598,16 +604,17 @@ const actions = {
   archive: async (el) => {
     const on = el.dataset.value === "1";
     if (on && !(await confirmModal({ title: "归档这则公告？", text: "归档后员工将看不到，管理员仍可在「已归档」找到。", okLabel: "归档", danger: true }))) return;
-    run(async () => { must(await sb.from("announcements").update({ is_archived: on }).eq("id", el.dataset.id)); await loadAnns(); back(); });
+    run(async () => { mustAffect(await sb.from("announcements").update({ is_archived: on }).eq("id", el.dataset.id).select("id"), on ? "归档" : "取消归档"); await loadAnns(); back(); });
   },
   cat: (el) => { S.cat = el.dataset.cat; render(); },
   "delete-ann": async (el) => {
     const a = S.anns.find((x) => x.id === el.dataset.id);
     if (!a || !(await confirmModal({ title: "删除这则公告？", text: `「${a.title}」和它的图片会永久删除，无法恢复。只是暂时不想让员工看到，请改用「归档」。`, okLabel: "永久删除", danger: true }))) return;
     run(async () => {
+      // 先删公告（确认真的删掉了）再清图片，避免权限不足时图片没了公告还在
+      mustAffect(await sb.from("announcements").delete().eq("id", a.id).select("id"), "删除");
       const paths = (a.attachments ?? []).map((t) => t.storage_path);
       if (paths.length) await sb.storage.from(CONFIG.bucket).remove(paths);
-      must(await sb.from("announcements").delete().eq("id", a.id));
       paths.forEach((p) => imgCache.delete(p));
       await loadAnns(); back();
     });
@@ -615,12 +622,12 @@ const actions = {
   "nav-cats": () => { go({ name: "cats" }); Promise.all([loadCats(), S.anns ? null : loadAnns()]).then(render); },
   "cat-rename": async (el) => {
     const c = S.categories.find((x) => x.id === el.dataset.id), name = await promptModal({ title: "分类改名", value: c.name });
-    if (name && name !== c.name) run(async () => { must(await sb.from("categories").update({ name }).eq("id", c.id)); await loadCats(); });
+    if (name && name !== c.name) run(async () => { mustAffect(await sb.from("categories").update({ name }).eq("id", c.id).select("id"), "改名"); await loadCats(); });
   },
   "cat-delete": async (el) => {
     const c = S.categories.find((x) => x.id === el.dataset.id);
     if (!(await confirmModal({ title: `删除分类「${c.name}」？`, text: "公告不会被删，该分类下的公告会变成「未分类」。", okLabel: "删除", danger: true }))) return;
-    run(async () => { must(await sb.from("categories").delete().eq("id", c.id)); await loadCats(); await loadAnns(); });
+    run(async () => { mustAffect(await sb.from("categories").delete().eq("id", c.id).select("id"), "删除"); await loadCats(); await loadAnns(); });
   },
   "nav-users": () => { go({ name: "users" }); loadUsers().catch((e) => { S.error = friendly(e); S.users ??= []; }).finally(render); },
   "nav-user-new": () => go({ name: "user-new" }),
@@ -639,12 +646,12 @@ const actions = {
   },
   "dept-rename": async (el) => {
     const d = S.departments.find((x) => x.id === el.dataset.id), name = await promptModal({ title: "部门改名", value: d.name });
-    if (name && name !== d.name) run(async () => { must(await sb.from("departments").update({ name }).eq("id", d.id)); await loadDepts(); });
+    if (name && name !== d.name) run(async () => { mustAffect(await sb.from("departments").update({ name }).eq("id", d.id).select("id"), "改名"); await loadDepts(); });
   },
   "dept-delete": async (el) => {
     const d = S.departments.find((x) => x.id === el.dataset.id);
     if (!(await confirmModal({ title: `删除「${d.name}」？`, text: "该部门员工会变成「未分配」，只能看到全公司公告。", okLabel: "删除", danger: true }))) return;
-    run(async () => { must(await sb.from("departments").delete().eq("id", d.id)); await loadDepts(); });
+    run(async () => { mustAffect(await sb.from("departments").delete().eq("id", d.id).select("id"), "删除"); await loadDepts(); });
   },
   "signout-confirm": async () => { if (await confirmModal({ title: "确定登出？", text: "", okLabel: "登出", danger: true })) actions.signout(); },
   signout: async () => { await sb.auth.signOut(); Object.assign(S, { profile: null, anns: null, users: null, logs: null, popupShown: false, view: { name: "list" } }); render(); },
@@ -680,8 +687,8 @@ const forms = {
   }),
   "user-edit": (f) => run(async () => {
     const id = f.dataset.id, u = S.users.find((x) => x.id === id);
-    must(await sb.from("profiles").update({ display_name: f.display_name.value.trim(), initials: f.initials.value.trim().toUpperCase(),
-      department_id: f.department_id.value || null }).eq("id", id));
+    mustAffect(await sb.from("profiles").update({ display_name: f.display_name.value.trim(), initials: f.initials.value.trim().toUpperCase(),
+      department_id: f.department_id.value || null }).eq("id", id).select("id"), "保存");
     if (f.role && f.role.value !== u.role) await adminAction({ action: "set_role", user_id: id, role: f.role.value });
     await loadUsers();
     if (id === S.profile.id) await loadProfile();
@@ -727,7 +734,7 @@ $app.addEventListener("change", async (e) => {
   const key = e.target.dataset.input, d = S.draft;
   if (key === "quick-cat") {
     const id = e.target.dataset.id, value = e.target.value || null;
-    return run(async () => { must(await sb.from("announcements").update({ category_id: value }).eq("id", id)); await loadAnns(); S.info = "分类已更新"; });
+    return run(async () => { mustAffect(await sb.from("announcements").update({ category_id: value }).eq("id", id).select("id"), "调整分类"); await loadAnns(); S.info = "分类已更新"; });
   }
   if (!key || !d) return;
   if (key === "d.category") d.category = e.target.value;
